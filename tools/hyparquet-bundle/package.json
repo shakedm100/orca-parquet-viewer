@@ -1,0 +1,16 @@
+{
+  "name": "parquet-viewer-hyparquet-bundle",
+  "private": true,
+  "description": "Builds editor/vendor/hyparquet.mjs, the Parquet reader the viewer's worker loads.",
+  "type": "module",
+  "scripts": {
+    "build": "esbuild entry.js --bundle --format=esm --minify --legal-comments=eof --outfile=../../editor/vendor/hyparquet.mjs"
+  },
+  "dependencies": {
+    "hyparquet": "1.32.0",
+    "hyparquet-compressors": "1.1.3"
+  },
+  "devDependencies": {
+    "esbuild": "0.24.2"
+  }
+}

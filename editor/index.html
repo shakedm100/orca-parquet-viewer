@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Parquet</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="toolbar">
+      <nav class="tabs" role="tablist" aria-label="View">
+        <button role="tab" id="tab-data" aria-selected="true" aria-controls="panel-data">Data</button>
+        <button role="tab" id="tab-schema" aria-selected="false" aria-controls="panel-schema">Schema</button>
+        <button role="tab" id="tab-info" aria-selected="false" aria-controls="panel-info">Info</button>
+      </nav>
+      <span class="spacer"></span>
+      <label class="search" title="Show rows with this text in any visible column">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6" /><path d="M20 20l-4.5-4.5" /></svg>
+        <input id="search" type="search" placeholder="Filter rows" aria-label="Filter rows" spellcheck="false" />
+      </label>
+      <button id="columnsToggle" aria-haspopup="menu" aria-expanded="false" title="Show or hide columns">Columns</button>
+      <button id="exportToggle" aria-haspopup="menu" aria-expanded="false" title="Save the rows shown as CSV or JSON">Export</button>
+      <div id="columnsMenu" class="popover" role="menu" hidden></div>
+      <div id="exportMenu" class="popover narrow" role="menu" hidden>
+        <button class="item" data-format="csv" role="menuitem">CSV (.csv)</button>
+        <button class="item" data-format="json" role="menuitem">JSON (.json)</button>
+        <button class="item" data-format="jsonl" role="menuitem">JSON Lines (.jsonl)</button>
+      </div>
+    </header>
+
+    <section id="panel-data" class="panel data" role="tabpanel" aria-labelledby="tab-data">
+      <div id="grid" class="grid" tabindex="0" aria-label="Rows" role="grid">
+        <div id="spacer" class="spacer-box"></div>
+        <div id="cells" class="layer"></div>
+        <div id="gutter" class="layer gutter"></div>
+        <div id="header" class="layer header"></div>
+        <div id="corner" class="corner">#</div>
+      </div>
+      <aside id="detail" class="detail" hidden>
+        <header>
+          <div>
+            <div id="detailTitle" class="title"></div>
+            <div id="detailType" class="muted"></div>
+          </div>
+          <button id="detailClose" class="icon" aria-label="Close details" title="Close (Esc)"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></svg></button>
+        </header>
+        <pre id="detailValue"></pre>
+        <footer>
+          <button id="copyValue">Copy value</button>
+          <button id="copyRow">Copy row as JSON</button>
+        </footer>
+      </aside>
+    </section>
+
+    <section id="panel-schema" class="panel doc" role="tabpanel" aria-labelledby="tab-schema" hidden></section>
+    <section id="panel-info" class="panel doc" role="tabpanel" aria-labelledby="tab-info" hidden></section>
+
+    <footer class="statusbar">
+      <span id="status">Opening…</span>
+      <span class="spacer"></span>
+      <span id="viewNote" class="muted"></span>
+    </footer>
+
+    <div id="message" class="message" hidden><p class="title"></p><p class="muted"></p></div>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
