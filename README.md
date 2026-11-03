@@ -23,9 +23,20 @@ It needs nothing installed and asks for no access beyond showing the files it op
 
 ## Large files
 
-Rows load in the background, the ones on screen first. Up to about four million cells stay in
-memory; past that, rows load as you scroll to them, and sorting and filtering cover the rows
-loaded so far (the status bar says so). Orca opens files up to 64 MB in plugin editors.
+The file stays in a worker; the page keeps only the rows near what is on screen.
+
+- **Filter and sort cover the whole file.** The worker streams it one column of one row group
+  at a time, keeping only a match mask and a row order. A filter skips columns that cannot
+  contain the text (a word in a number column). For files over two million cells, search starts
+  when you press Enter rather than at every pause in typing; Esc clears it.
+- **Memory has a ceiling.** Parquet readers decode a column chunk (one column of one row group)
+  whole, so before decoding one the worker estimates its cost from the footer. A chunk over the
+  budget (a nested column in a very large row group, say) is not decoded: its cells read "(too
+  large to load)", a search says which columns it skipped, and such a column cannot be sorted.
+- **Page indexes help.** When the writer stored an offset index (`write_page_index=True` in
+  pyarrow; Spark, DuckDB and Polars can too), showing rows decodes only their pages instead of
+  the whole row group.
+- Orca opens files up to 64 MB in plugin editors.
 
 ## Development
 

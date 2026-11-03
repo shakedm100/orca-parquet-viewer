@@ -176,8 +176,47 @@ export function openParquet(buffer) {
   }
 }
 
-/** Rows [start, end) as arrays, in the order of `summary.columns`. */
-export function readRows(buffer, metadata, start, end) {
+/**
+ * Rows [start, end) of `columns` (by index into `summary.columns`), decoded one column at a time
+ * and zipped. Without an offset index Parquet readers decode a column's whole row group to return
+ * any part of it; one column at a time keeps that to a single column chunk in memory.
+ */
+export async function readRowsByColumn(buffer, metadata, summary, start, end, columns) {
+  const count = end - start
+  const rows = Array.from({ length: count }, () => new Array(columns.length))
+  for (let c = 0; c < columns.length; c += 1) {
+    const values = await readRows(buffer, metadata, start, end, [summary.columns[columns[c]].name])
+    for (let r = 0; r < count; r += 1) rows[r][c] = values[r][0]
+  }
+  return rows
+}
+
+/**
+ * One column's values for rows [start, end) as a flat array. Delivered column chunk by column
+ * chunk, without wrapping each value in a row array: far less garbage than reading rows.
+ */
+export function readColumnValues(buffer, metadata, start, end, name) {
+  const out = new Array(end - start)
+  return parquetRead({
+    file: buffer,
+    metadata,
+    compressors,
+    utf8: false,
+    useOffsetIndex: true,
+    columns: [name],
+    rowStart: start,
+    rowEnd: end,
+    // A chunk may reach outside the range asked for; keep only the rows inside it.
+    onChunk: ({ columnData, rowStart }) => {
+      const from = Math.max(start, rowStart)
+      const to = Math.min(end, rowStart + columnData.length)
+      for (let row = from; row < to; row += 1) out[row - start] = columnData[row - rowStart]
+    }
+  }).then(() => out)
+}
+
+/** Rows [start, end) as arrays, in the order of `columns` (by name; all columns when omitted). */
+export function readRows(buffer, metadata, start, end, columns) {
   return new Promise((resolve, reject) => {
     parquetRead({
       file: buffer,
@@ -185,6 +224,9 @@ export function readRows(buffer, metadata, start, end) {
       compressors,
       // Unlabeled BYTE_ARRAY stays binary; the viewer shows it as text when it is valid UTF-8.
       utf8: false,
+      columns,
+      // With an offset index, a range decodes only its pages instead of the whole row group.
+      useOffsetIndex: true,
       rowStart: start,
       rowEnd: end,
       rowFormat: 'array',

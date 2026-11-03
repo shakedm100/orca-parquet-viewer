@@ -46,6 +46,7 @@ export function toJson(value, space) {
  */
 export function cellText(value, column = {}) {
   if (value === null || value === undefined) return null
+  if (value.tooLarge === true) return '(too large to load)'
   if (typeof value === 'string') return value
   if (typeof value === 'number') return Number.isInteger(value) ? String(value) : String(Number(value.toPrecision(12)))
   if (typeof value === 'bigint' || typeof value === 'boolean') return String(value)
@@ -57,6 +58,7 @@ export function cellText(value, column = {}) {
 /** The full value, for the detail pane: pretty JSON for nested values. */
 export function detailText(value, column = {}) {
   if (value === null || value === undefined) return 'null'
+  if (value.tooLarge === true) return 'This column’s row group is too large to load in Orca without risking the machine’s memory.'
   if (value instanceof Uint8Array) {
     const { text, isText } = bytesText(value, 4096)
     return isText ? text : `${value.length} bytes\n${text}`
@@ -106,4 +108,49 @@ export function formatBytes(bytes) {
 export function csvField(value, column) {
   const text = isNull(value) ? '' : (cellText(value, column) ?? '')
   return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
+}
+
+/**
+ * A case-insensitive substring test over decoded values that allocates as little as it can: strings
+ * are tested in place, and nested values are walked (keys and values) instead of turned into JSON.
+ */
+export function makeMatcher(term) {
+  const pattern = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
+  const test = (value, column) => {
+    if (value === null || value === undefined) return false
+    switch (typeof value) {
+      case 'string':
+        return pattern.test(value)
+      case 'number':
+        return pattern.test(cellText(value))
+      case 'bigint':
+      case 'boolean':
+        return pattern.test(String(value))
+      default:
+        break
+    }
+    if (value instanceof Date) return pattern.test(cellText(value, column))
+    if (value instanceof Uint8Array) return pattern.test(bytesText(value).text)
+    if (Array.isArray(value)) {
+      for (const item of value) if (test(item)) return true
+      return false
+    }
+    for (const key of Object.keys(value)) if (pattern.test(key) || test(value[key])) return true
+    return false
+  }
+  return test
+}
+
+/** Whether a column of this kind could show `term` at all; others need not be decoded. */
+export function columnCanMatch(column, term) {
+  switch (column.kind) {
+    case 'number':
+      return /^[-+.\deE]+$/.test(term)
+    case 'boolean':
+      return 'true'.includes(term.toLowerCase()) || 'false'.includes(term.toLowerCase())
+    case 'time':
+      return /^[\d\-:. TZ]+$/i.test(term)
+    default:
+      return true
+  }
 }

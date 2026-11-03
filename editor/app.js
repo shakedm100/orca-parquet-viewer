@@ -1,12 +1,12 @@
 // Parquet viewer: reads the file Orca hands this editor (its bytes), decodes it in a worker and
 // shows the rows in a grid that draws only what is on screen, plus the schema and file details.
-import { cellText, compareValues, csvField, detailText, formatBytes, isNull, toJson } from './format.js'
+import { cellText, detailText, formatBytes, isNull, toJson } from './format.js'
 
-const CHUNK = 2000 // rows per worker request
-const CELL_BUDGET = 4_000_000 // cells kept in memory; past it, rows load as you scroll to them
+const CHUNK = 500 // rows per range request while scrolling an unsorted, unfiltered file
+const CACHE_CELLS = 400_000 // decoded cells kept for redraws; the file itself stays in the worker
 const ROW = 26
 const HEAD = 40
-const OVERSCAN = 6
+const OVERSCAN = 8
 
 const $ = (id) => document.getElementById(id)
 const els = {
@@ -22,17 +22,18 @@ const state = {
   generation: 0,
   summary: null,
   columns: [], // { name, type, kind, isDate, width, hidden }
-  rows: [], // sparse: physical row -> array of values
-  loaded: new Set(), // chunk numbers held in `rows`
-  pending: new Set(),
-  inFlight: null,
-  budgetRows: 0,
+  cache: new Map(), // physical row -> values, least recently drawn first
+  cacheRows: 0, // how many rows `cache` may hold
+  requested: new Set(), // physical rows asked for and not yet back
+  inFlight: false,
   view: null, // Int32Array of physical rows when sorted or filtered, else null
   sort: null, // { col, dir: 1 | -1 }
   filter: '',
+  job: 0, // the newest view request
+  exportJob: 0,
+  busy: null, // { phase, done, total } while the worker filters, sorts or exports
   selected: null, // { row (view index), col (index into columns) }
-  gutterWidth: 60,
-  offsets: [] // x of each visible column
+  gutterWidth: 60
 }
 
 const worker = new Worker(new URL('./reader-worker.js', import.meta.url), { type: 'module' })
@@ -47,7 +48,7 @@ function showMessage(title, text = '') {
 
 function open(bytes) {
   state.generation += 1
-  Object.assign(state, { summary: null, rows: [], loaded: new Set(), pending: new Set(), inFlight: null, view: null, selected: null })
+  Object.assign(state, { summary: null, cache: new Map(), requested: new Set(), inFlight: false, view: null, selected: null, busy: null })
   els.detail.hidden = true
   els.status.textContent = `Reading ${formatBytes(bytes.byteLength)}…`
   worker.postMessage({ type: 'open', bytes, generation: state.generation }, [bytes])
@@ -56,13 +57,26 @@ function open(bytes) {
 worker.onmessage = ({ data }) => {
   if (data.generation !== state.generation) return
   if (data.type === 'opened') onOpened(data.summary)
-  else if (data.type === 'rows') onRows(data.start, data.rows)
+  else if (data.type === 'rows') onRows(Array.from({ length: data.rows.length }, (_, i) => data.start + i), data.rows)
+  else if (data.type === 'picked') onRows(data.rows, data.values)
+  else if (data.type === 'progress') onProgress(data)
+  else if (data.type === 'view') onView(data)
+  else if (data.type === 'exported') void onExported(data)
   else if (data.type === 'error') {
     if (data.request === 'open') showMessage('This file could not be read as Parquet', data.message)
     else {
-      els.viewNote.textContent = `Rows from ${data.start.toLocaleString()} could not be read: ${data.message}`
-      state.inFlight = null
-      pump()
+      els.viewNote.textContent = `Could not read rows: ${data.message}`
+      if (data.request === 'rows' || data.request === 'pick') {
+        state.inFlight = false
+        state.requested.clear()
+      }
+      if (data.request === 'view' || data.request === 'export') {
+        state.busy = null
+        if (data.request === 'view' && state.sort) state.sort = null
+        layout()
+        els.viewNote.textContent = data.message
+        return
+      }
     }
   }
 }
@@ -78,158 +92,151 @@ function onOpened(summary) {
     width: previous.get(column.name)?.width ?? DEFAULT_WIDTH[column.kind] ?? 160,
     hidden: previous.get(column.name)?.hidden ?? false
   }))
-  state.budgetRows = Math.max(CHUNK, Math.floor(CELL_BUDGET / Math.max(1, summary.columns.length)))
+  state.cacheRows = Math.max(400, Math.floor(CACHE_CELLS / Math.max(1, summary.columns.length)))
   state.gutterWidth = Math.max(48, String(summary.numRows).length * 8 + 22)
   els.message.hidden = true
+  els.search.placeholder = liveSearch() ? 'Filter rows' : 'Filter rows (Enter)'
   renderSchema()
   renderInfo()
   renderColumnsMenu()
-  if (state.filter || state.sort) rebuildView()
   layout()
   updateStatus()
-  pump()
+  if (state.filter || state.sort) requestView()
 }
 
-function onRows(start, rows) {
-  const chunk = start / CHUNK
-  for (let i = 0; i < rows.length; i += 1) state.rows[start + i] = rows[i]
-  state.loaded.add(chunk)
-  state.pending.delete(chunk)
-  state.inFlight = null
-  // Past the memory budget, drop the chunks farthest from what is on screen.
-  if (state.loaded.size * CHUNK > state.budgetRows) evict()
-  if (state.view !== null) scheduleRebuild()
+function onRows(rows, values) {
+  for (let i = 0; i < rows.length; i += 1) {
+    state.cache.delete(rows[i])
+    state.cache.set(rows[i], values[i])
+    state.requested.delete(rows[i])
+  }
+  // Oldest first: drop what was drawn longest ago.
+  for (const row of state.cache.keys()) {
+    if (state.cache.size <= state.cacheRows) break
+    state.cache.delete(row)
+  }
+  state.inFlight = false
   render()
-  updateStatus()
-  pump()
 }
 
-function visibleChunks() {
-  const first = Math.max(0, Math.floor((els.grid.scrollTop) / ROW) - OVERSCAN)
-  const last = Math.min(viewLength() - 1, Math.ceil((els.grid.scrollTop + els.grid.clientHeight) / ROW) + OVERSCAN)
-  const chunks = new Set()
-  for (let i = first; i <= last; i += 1) chunks.add(Math.floor(physicalRow(i) / CHUNK))
-  return chunks
+/** A row for drawing, marked as recently used; undefined until the worker sends it. */
+function rowValues(row) {
+  const values = state.cache.get(row)
+  if (values !== undefined) {
+    state.cache.delete(row)
+    state.cache.set(row, values)
+  }
+  return values
 }
 
-function evict() {
-  const keep = visibleChunks()
-  const center = [...keep][0] ?? 0
-  const victims = [...state.loaded].filter((chunk) => !keep.has(chunk)).sort((a, b) => Math.abs(b - center) - Math.abs(a - center))
-  while (state.loaded.size * CHUNK > state.budgetRows && victims.length) {
-    const chunk = victims.shift()
-    state.loaded.delete(chunk)
-    for (let i = chunk * CHUNK; i < (chunk + 1) * CHUNK; i += 1) delete state.rows[i]
+/** Asks for the rows on screen that are not cached: one range when unsorted, else exactly those rows. */
+function requestVisible(first, last) {
+  if (!state.summary || state.inFlight) return
+  const missing = []
+  for (let i = first; i <= last; i += 1) {
+    const row = physicalRow(i)
+    if (!state.cache.has(row) && !state.requested.has(row)) missing.push(row)
+  }
+  if (missing.length === 0) return
+  state.inFlight = true
+  if (!state.view) {
+    const start = Math.floor(missing[0] / CHUNK) * CHUNK
+    const end = Math.min(state.summary.numRows, Math.max(start + CHUNK, missing[missing.length - 1] + 1))
+    for (let row = start; row < end; row += 1) state.requested.add(row)
+    worker.postMessage({ type: 'rows', generation: state.generation, start, end })
+  } else {
+    const rows = Int32Array.from(missing).sort()
+    for (const row of rows) state.requested.add(row)
+    worker.postMessage({ type: 'pick', generation: state.generation, rows })
   }
 }
 
-/** Asks the worker for the next chunk: what is on screen first, then the rest in order while it fits. */
-function pump() {
-  if (!state.summary || state.inFlight !== null) return
-  const total = Math.ceil(state.summary.numRows / CHUNK)
-  let next = null
-  for (const chunk of visibleChunks()) {
-    if (!state.loaded.has(chunk)) {
-      next = chunk
-      break
-    }
-  }
-  if (next === null && state.loaded.size * CHUNK < state.budgetRows) {
-    for (let chunk = 0; chunk < total; chunk += 1) {
-      if (!state.loaded.has(chunk)) {
-        next = chunk
-        break
-      }
-    }
-  }
-  if (next === null || next >= total) return
-  state.inFlight = next
-  state.pending.add(next)
-  const start = next * CHUNK
-  worker.postMessage({ type: 'rows', generation: state.generation, start, end: Math.min(state.summary.numRows, start + CHUNK) })
-}
-
-const allLoaded = () => state.summary && state.loaded.size >= Math.ceil(state.summary.numRows / CHUNK)
-const loadedRows = () => (state.summary ? Math.min(state.summary.numRows, state.loaded.size * CHUNK) : 0)
-
-// ------------------------------------------------------------------ sort and filter
+// ------------------------------------------------------------------ sort and filter (in the worker)
 
 const viewLength = () => (state.view ? state.view.length : (state.summary?.numRows ?? 0))
 const physicalRow = (index) => (state.view ? state.view[index] : index)
+const shownColumnIndices = () => state.columns.map((column, i) => (column.hidden ? -1 : i)).filter((i) => i >= 0)
 
-let rebuildTimer = 0
-function scheduleRebuild() {
-  clearTimeout(rebuildTimer)
-  rebuildTimer = setTimeout(() => {
-    rebuildView()
-    render()
-    updateStatus()
-  }, 250)
-}
-
-/** Sort and filter run over the rows in memory; a note says so when that is not all of them. */
-function rebuildView() {
-  if (!state.summary || (!state.filter && !state.sort)) {
+/** Filters and sorts the whole file in the worker, which streams it in small slices. */
+function requestView() {
+  if (!state.summary) return
+  state.job += 1
+  if (!state.filter && !state.sort) {
     state.view = null
+    state.busy = null
+    afterViewChange()
     return
   }
-  const indices = []
-  const term = state.filter.toLowerCase()
-  const shown = state.columns.map((column, i) => [column, i]).filter(([column]) => !column.hidden)
-  for (const chunk of [...state.loaded].sort((a, b) => a - b)) {
-    const end = Math.min(state.summary.numRows, (chunk + 1) * CHUNK)
-    for (let row = chunk * CHUNK; row < end; row += 1) {
-      const values = state.rows[row]
-      if (!values) continue
-      if (term) {
-        let hit = false
-        for (const [column, i] of shown) {
-          const text = cellText(values[i], column)
-          if (text !== null && text.toLowerCase().includes(term)) {
-            hit = true
-            break
-          }
-        }
-        if (!hit) continue
-      }
-      indices.push(row)
-    }
-  }
-  if (state.sort) {
-    const { col, dir } = state.sort
-    indices.sort((a, b) => {
-      const x = state.rows[a][col]
-      const y = state.rows[b][col]
-      if (isNull(x) || isNull(y)) return compareValues(x, y) || a - b // nulls last both ways
-      return dir * compareValues(x, y) || a - b
-    })
-  }
-  state.view = Int32Array.from(indices)
+  state.busy = { phase: state.filter ? 'filter' : 'sort', done: 0, total: state.summary.numRows }
+  updateStatus()
+  worker.postMessage({
+    type: 'view',
+    generation: state.generation,
+    job: state.job,
+    filter: state.filter ? { term: state.filter, columns: shownColumnIndices() } : null,
+    sort: state.sort
+  })
+}
+
+function onProgress({ job, phase, done, total }) {
+  if (phase === 'export' ? job !== state.exportJob : job !== state.job) return
+  state.busy = { phase, done, total }
+  updateStatus()
+}
+
+function onView({ job, rows, skipped }) {
+  if (job !== state.job) return
+  state.view = rows
+  state.busy = null
+  state.skipped = skipped ?? []
+  afterViewChange()
+}
+
+function afterViewChange() {
+  state.selected = null
+  els.detail.hidden = true
+  state.cache.clear() // rows were picked for the previous order; start clean
+  state.requested.clear()
+  state.inFlight = false
+  els.grid.scrollTop = 0
+  layout()
+  updateStatus()
+}
+
+// Small files filter as you type. A large one is scanned whole for each search, so its search
+// waits for Enter rather than rescanning the file at every pause in typing.
+const LIVE_SEARCH_CELLS = 2_000_000
+const liveSearch = () => !state.summary || state.summary.numRows * state.summary.columns.length <= LIVE_SEARCH_CELLS
+
+function applySearch() {
+  const next = els.search.value.trim()
+  if (next === state.filter) return
+  state.filter = next
+  requestView()
 }
 
 let filterTimer = 0
 els.search.addEventListener('input', () => {
   clearTimeout(filterTimer)
-  filterTimer = setTimeout(() => {
-    state.filter = els.search.value.trim()
-    state.selected = null
-    els.detail.hidden = true
-    rebuildView()
-    els.grid.scrollTop = 0
-    layout()
-    updateStatus()
-    pump()
-  }, 200)
+  if (liveSearch() || els.search.value.trim() === '') filterTimer = setTimeout(applySearch, 250)
+  else els.viewNote.textContent = state.filter === els.search.value.trim() ? '' : 'Press Enter to search'
+})
+els.search.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    clearTimeout(filterTimer)
+    applySearch()
+  } else if (event.key === 'Escape' && els.search.value) {
+    event.stopPropagation()
+    els.search.value = ''
+    applySearch()
+  }
 })
 
 function toggleSort(col) {
   if (!state.sort || state.sort.col !== col) state.sort = { col, dir: 1 }
   else if (state.sort.dir === 1) state.sort = { col, dir: -1 }
   else state.sort = null
-  rebuildView()
-  layout()
-  updateStatus()
-  pump()
+  requestView()
 }
 
 // ------------------------------------------------------------------ grid drawing
@@ -283,7 +290,7 @@ function draw() {
   const gutter = document.createDocumentFragment()
   for (let i = first; i <= last; i += 1) {
     const row = physicalRow(i)
-    const values = state.rows[row]
+    const values = rowValues(row)
     const top = HEAD + i * ROW
     const odd = i % 2 ? ' odd' : ''
     const selectedRow = state.selected?.row === i
@@ -341,7 +348,7 @@ function draw() {
   }
   els.header.replaceChildren(head)
   Object.assign(els.corner.style, { left: `${scrollLeft}px`, top: `${scrollTop}px`, width: `${state.gutterWidth}px` })
-  if (visibleChunks().size && [...visibleChunks()].some((chunk) => !state.loaded.has(chunk))) pump()
+  requestVisible(first, last)
 }
 
 els.grid.addEventListener('scroll', render, { passive: true })
@@ -381,7 +388,8 @@ els.header.addEventListener('dblclick', (event) => {
   let longest = column.name.length
   const first = Math.floor(els.grid.scrollTop / ROW)
   for (let i = first; i < Math.min(viewLength(), first + 200); i += 1) {
-    const text = state.rows[physicalRow(i)] ? cellText(state.rows[physicalRow(i)][index], column) : ''
+    const values = state.cache.get(physicalRow(i))
+    const text = values ? cellText(values[index], column) : ''
     longest = Math.max(longest, Math.min(80, (text ?? 'null').length))
   }
   column.width = Math.max(60, Math.min(700, longest * 7.4 + 24))
@@ -408,7 +416,7 @@ function select(row, col) {
 
 function selectedValue() {
   if (!state.selected) return { ready: false }
-  const values = state.rows[physicalRow(state.selected.row)]
+  const values = state.cache.get(physicalRow(state.selected.row))
   if (!values) return { ready: false }
   return { ready: true, values, value: values[state.selected.col], column: state.columns[state.selected.col] }
 }
@@ -569,58 +577,82 @@ function setAllHidden(hidden) {
   afterColumnsChange()
 }
 function afterColumnsChange() {
-  if (state.filter) rebuildView()
+  if (state.filter) requestView() // the filter searches the visible columns
   layout()
   updateStatus()
 }
 
 // ------------------------------------------------------------------ export
 
-els.exportMenu.addEventListener('click', async (event) => {
+// The worker writes the file; the save dialog opens when it is ready. A save needs the click's
+// user activation, which lasts only a few seconds, so the click also starts the work at once.
+let pendingSave = null
+els.exportMenu.addEventListener('click', (event) => {
   const format = event.target.closest('[data-format]')?.dataset.format
-  if (!format) return
+  if (!format || !state.summary) return
   closeMenus()
   if (!orca.files?.saveAs) {
     els.viewNote.textContent = 'Saving needs the Orca desktop app.'
     return
   }
-  const shown = state.columns.map((column, i) => [column, i]).filter(([column]) => !column.hidden)
-  const parts = []
-  if (format === 'csv') parts.push(shown.map(([column]) => csvField(column.name, {})).join(','), '\n')
-  if (format === 'json') parts.push('[\n')
-  let count = 0
-  let size = 0
-  const total = viewLength()
-  for (let i = 0; i < total; i += 1) {
-    const values = state.rows[physicalRow(i)]
-    if (!values) continue
-    let line
-    if (format === 'csv') line = `${shown.map(([column, j]) => csvField(values[j], column)).join(',')}\n`
-    else {
-      const object = Object.fromEntries(shown.map(([column, j]) => [column.name, values[j]]))
-      line = format === 'json' ? `${count ? ',\n' : ''}  ${toJson(object)}` : `${toJson(object)}\n`
-    }
-    size += line.length
-    if (size > 60 * 1024 * 1024) {
-      els.viewNote.textContent = 'Export stopped at 60 MB, Orca’s limit for a saved file. Filter or hide columns to export less.'
-      break
-    }
-    parts.push(line)
-    count += 1
-  }
-  if (format === 'json') parts.push('\n]\n')
-  const name = `${state.view ? 'rows-shown' : 'rows'}.${format}`
+  state.exportJob += 1
+  pendingSave = { job: state.exportJob, format }
+  state.busy = { phase: 'export', done: 0, total: viewLength() }
+  updateStatus()
+  worker.postMessage({
+    type: 'export',
+    generation: state.generation,
+    job: state.exportJob,
+    format,
+    rows: state.view,
+    columns: shownColumnIndices()
+  })
+})
+
+async function onExported({ job, format, text, count, truncated }) {
+  if (pendingSave?.job !== job) return
+  pendingSave = null
+  state.busy = null
+  updateStatus()
   try {
     const { status } = await orca.files.saveAs({
-      suggestedName: name,
+      suggestedName: `${state.view ? 'rows-shown' : 'rows'}.${format}`,
       mimeType: format === 'csv' ? 'text/csv' : 'application/json',
-      data: parts.join('')
+      data: text
     })
-    if (status === 'saved') els.viewNote.textContent = `Saved ${count.toLocaleString()} rows.`
+    if (status === 'saved') {
+      els.viewNote.textContent = truncated
+        ? `Saved the first ${count.toLocaleString()} rows: Orca saves files up to 64 MB. Filter or hide columns to export the rest.`
+        : `Saved ${count.toLocaleString()} rows.`
+    }
   } catch (error) {
-    els.viewNote.textContent = `Could not save: ${error.message}`
+    // Past the click's activation window (a slow export), Orca refuses the dialog: offer a retry.
+    els.viewNote.textContent =
+      error.code === 'not_permitted' ? 'The export is ready: choose Export again to save it.' : `Could not save: ${error.message}`
+    if (error.code === 'not_permitted') readyExport = { format, text }
   }
-})
+}
+
+// A finished export whose dialog was refused; the next click saves it without redoing the work.
+let readyExport = null
+els.exportMenu.addEventListener(
+  'click',
+  async (event) => {
+    const format = event.target.closest('[data-format]')?.dataset.format
+    if (!readyExport || readyExport.format !== format) return
+    event.stopImmediatePropagation()
+    closeMenus()
+    const { text } = readyExport
+    readyExport = null
+    const { status } = await orca.files.saveAs({
+      suggestedName: `${state.view ? 'rows-shown' : 'rows'}.${format}`,
+      mimeType: format === 'csv' ? 'text/csv' : 'application/json',
+      data: text
+    })
+    if (status === 'saved') els.viewNote.textContent = 'Saved.'
+  },
+  true
+)
 
 // ------------------------------------------------------------------ schema and info tabs
 
@@ -758,22 +790,24 @@ for (const tab of document.querySelectorAll('[role=tab]')) {
   })
 }
 
+const PHASES = { filter: 'Filtering', sort: 'Sorting', ordering: 'Ordering', export: 'Exporting' }
+
 function updateStatus() {
   const s = state.summary
   if (!s) return
   const shown = state.columns.filter((column) => !column.hidden).length
   const columns = shown === s.columns.length ? `${s.columns.length} columns` : `${shown} of ${s.columns.length} columns`
-  let text = `${s.numRows.toLocaleString()} rows, ${columns}`
-  if (state.view && state.filter) text = `${state.view.length.toLocaleString()} of ${s.numRows.toLocaleString()} rows match, ${columns}`
-  els.status.textContent = text
+  els.status.textContent =
+    state.view && state.filter
+      ? `${state.view.length.toLocaleString()} of ${s.numRows.toLocaleString()} rows match, ${columns}`
+      : `${s.numRows.toLocaleString()} rows, ${columns}`
   const notes = []
-  if (!allLoaded()) {
-    const inMemory = loadedRows()
-    if (state.view) notes.push(`Sorting and filtering cover the ${inMemory.toLocaleString()} rows loaded so far`)
-    else if (state.inFlight !== null && inMemory < state.budgetRows) notes.push(`Loading ${inMemory.toLocaleString()} of ${s.numRows.toLocaleString()}…`)
-    else if (inMemory >= state.budgetRows) notes.push('Large file: rows load as you scroll')
+  if (state.busy) {
+    const percent = state.busy.total ? Math.floor((100 * state.busy.done) / state.busy.total) : 0
+    notes.push(`${PHASES[state.busy.phase] ?? 'Working'}… ${state.busy.phase === 'ordering' ? '' : `${percent}%`}`.trim())
   }
-  if (state.sort) notes.push(`sorted by ${state.columns[state.sort.col].name} ${state.sort.dir === 1 ? 'ascending' : 'descending'}`)
+  if (state.sort && !state.busy) notes.push(`sorted by ${state.columns[state.sort.col].name} ${state.sort.dir === 1 ? 'ascending' : 'descending'}`)
+  if (state.filter && !state.busy && state.skipped?.length) notes.push(`not searched (too large to load): ${state.skipped.join(', ')}`)
   els.viewNote.textContent = notes.join(', ')
 }
 
