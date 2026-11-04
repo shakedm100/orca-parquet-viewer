@@ -95,7 +95,6 @@ function onOpened(summary) {
   state.cacheRows = Math.max(400, Math.floor(CACHE_CELLS / Math.max(1, summary.columns.length)))
   state.gutterWidth = Math.max(48, String(summary.numRows).length * 8 + 22)
   els.message.hidden = true
-  els.search.placeholder = liveSearch() ? 'Filter rows' : 'Filter rows (Enter)'
   renderSchema()
   renderInfo()
   renderColumnsMenu()
@@ -203,10 +202,9 @@ function afterViewChange() {
   updateStatus()
 }
 
-// Small files filter as you type. A large one is scanned whole for each search, so its search
-// waits for Enter rather than rescanning the file at every pause in typing.
-const LIVE_SEARCH_CELLS = 2_000_000
-const liveSearch = () => !state.summary || state.summary.numRows * state.summary.columns.length <= LIVE_SEARCH_CELLS
+// The search starts once typing pauses for this long (Enter starts it at once). A newer search
+// closes the worker running the older one, so typing on never piles up scans.
+const SEARCH_PAUSE_MS = 500
 
 function applySearch() {
   const next = els.search.value.trim()
@@ -218,8 +216,7 @@ function applySearch() {
 let filterTimer = 0
 els.search.addEventListener('input', () => {
   clearTimeout(filterTimer)
-  if (liveSearch() || els.search.value.trim() === '') filterTimer = setTimeout(applySearch, 250)
-  else els.viewNote.textContent = state.filter === els.search.value.trim() ? '' : 'Press Enter to search'
+  filterTimer = setTimeout(applySearch, SEARCH_PAUSE_MS)
 })
 els.search.addEventListener('keydown', (event) => {
   if (event.key === 'Enter') {

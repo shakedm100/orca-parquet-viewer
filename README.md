@@ -7,7 +7,9 @@ Opens Apache Parquet files (`.parquet`, `.parq`) in Orca's editor, read-only.
   shows as text when it is printable UTF-8 and as hex otherwise.
   - Click a column header to sort (ascending, descending, off). Drag a header's edge to resize
     it; double-click the edge to fit the content.
-  - **Filter rows** keeps the rows that contain the text in any visible column.
+  - **Filter rows** keeps the rows that contain the text in any visible column. The search
+    starts in the background half a second after you stop typing (Enter starts it at once, Esc
+    clears it); typing again stops a search still running and starts the new one.
   - **Columns** shows or hides columns.
   - Click a cell to select it; double-click or press Enter for the detail pane with the full
     value. Ctrl+C copies the cell, Ctrl+Shift+C the row as JSON. Arrow keys, Page Up/Down and
@@ -33,8 +35,7 @@ The file stays in a worker; the page keeps only the rows near what is on screen.
 - **Filter and sort cover the whole file**, one row group at a time, keeping only a match mask
   and a row order. Each search runs in a short-lived worker that is closed when it finishes, so
   its memory goes back at once. A filter skips columns that cannot contain the text (a word in a
-  number column). For files over two million cells, search starts when you press Enter rather
-  than at every pause in typing; Esc clears it.
+  number column).
 - **Memory has a ceiling.** Where hyparquet decodes, the worker first estimates the cost of each
   column chunk from the footer; a chunk over the budget is not decoded, its cells read "(too
   large to load)", and a search says which columns it skipped.
