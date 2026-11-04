@@ -1,3 +1,4 @@
+window.__pluginStarted = true
 // Parquet viewer: reads the file Orca hands this editor (its bytes), decodes it in a worker and
 // shows the rows in a grid that draws only what is on screen, plus the schema and file details.
 import { cellText, detailText, formatBytes, isNull, toJson } from './format.js'
@@ -36,7 +37,16 @@ const state = {
   gutterWidth: 60
 }
 
-const worker = new Worker(new URL('./reader-worker.js', import.meta.url), { type: 'module' })
+let worker
+try {
+  worker = new Worker(new URL('./reader-worker.js', import.meta.url), { type: 'module' })
+} catch (error) {
+  // Without the desktop app's isolated frame, workers cannot load from the plugin folder.
+  document.getElementById('message').hidden = false
+  document.querySelector('#message .title').textContent = 'This viewer needs the Orca desktop app'
+  document.querySelector('#message .muted').textContent = `It reads Parquet in a background worker, which this Orca client cannot start (${error.message}). Open the file in Orca's desktop app.`
+  throw error
+}
 
 // ------------------------------------------------------------------ loading
 

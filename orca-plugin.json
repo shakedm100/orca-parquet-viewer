@@ -4,20 +4,28 @@
   "execution": "sandboxed-ui",
   "id": "parquet-viewer",
   "name": "Parquet Viewer",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Opens Apache Parquet files in the editor: a fast data grid with sort, filter and export, the schema, and file details with per-column statistics.",
-  "author": { "name": "shakedm100", "url": "https://github.com/shakedm100" },
+  "author": {
+    "name": "shakedm100",
+    "url": "https://github.com/shakedm100"
+  },
   "repository": "https://github.com/shakedm100/orca-parquet-viewer",
   "homepage": "https://github.com/shakedm100/orca-parquet-viewer",
   "license": "MIT",
-  "engines": { "orca": ">=1.4.246" },
+  "engines": {
+    "orca": ">=1.4.246"
+  },
   "pluginApi": 1,
   "contributes": {
     "customEditors": [
       {
         "id": "parquet",
         "title": "Parquet",
-        "extensions": [".parquet", ".parq"],
+        "extensions": [
+          ".parquet",
+          ".parq"
+        ],
         "entry": "editor/index.html",
         "priority": "default",
         "contentKind": "bytes"
