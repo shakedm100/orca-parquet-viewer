@@ -5,7 +5,8 @@
 // - `export` writes the result as CSV or JSON, also slice by slice.
 // A newer `view` or `export` request cancels the one still running.
 import { cellText, columnCanMatch, compareValues, csvField, isNull, makeMatcher, toJson } from './format.js'
-import { openParquet, readColumnValues } from './reader.js'
+import { openParquet, readColumnValues, scanColumnPages } from './reader.js'
+import { arrowSortKeys, openArrowRows, openArrowSearch } from './arrow-search.js'
 
 const CACHE_CELLS = 400_000 // decoded cells kept for nearby requests (a row group, or a window of one)
 // Parquet readers decode a column chunk (one column of one row group) whole. Before decoding one,
@@ -100,7 +101,40 @@ const allColumns = () => file.summary.columns.map((_, i) => i)
  * Rows [start, end) of every column. Decodes a window around them (the whole row group when it is
  * small) and keeps it, so scrolling nearby costs a slice instead of another decode.
  */
+// Decoded windows for display, from Arrow when WebAssembly runs here; null falls back to hyparquet.
+const ARROW_WINDOW_BYTES = 64 * 1024 * 1024 // uncompressed data a window may cover
+let arrowRows = undefined // undefined: not tried yet; null: unavailable
+async function arrowRowsBetween(start, end) {
+  if (arrowRows === undefined) {
+    try {
+      arrowRows = await openArrowRows(file.bytes, file.summary)
+    } catch {
+      arrowRows = null
+    }
+  }
+  if (!arrowRows) return null
+  if (!arrowRows.covers(start, end)) {
+    // The whole row group when it is modest, else a window around the request.
+    const group = groupAround(start)
+    const index = file.summary.rowGroups.findIndex((_, i) => groupsIn(start, start + 1)[0]?.index === i)
+    const bytes = index >= 0 ? file.metadata.row_groups[index].columns.reduce((sum, c) => sum + Number(c.meta_data?.total_uncompressed_size ?? 0), 0) : Infinity
+    let from = start
+    let to = end
+    if (group && bytes <= ARROW_WINDOW_BYTES && end <= group.end) {
+      from = group.start
+      to = group.end
+    } else {
+      from = Math.max(0, start - 10_000)
+      to = Math.min(file.summary.numRows, Math.max(end, from + 50_000))
+    }
+    await serial(() => arrowRows.load(from, to))
+  }
+  return arrowRows.rows(start, end)
+}
+
 async function rowsBetween(start, end) {
+  const fromArrow = await arrowRowsBetween(start, end)
+  if (fromArrow) return fromArrow
   if (cached && start >= cached.start && end <= cached.end) return cached.rows.slice(start - cached.start, end - cached.start)
   const group = groupAround(start)
   const columns = file.summary.columns.length
@@ -167,16 +201,47 @@ async function buildFilter(term, shown, job) {
   const matches = makeMatcher(term)
   const skipped = new Set()
   let count = 0
-  const finished = await scan(columns, job, 'filter', (c, values, first) => {
-    for (let r = 0; r < values.length; r += 1) {
-      if (mask[first + r]) continue // matched in an earlier column
-      if (matches(values[r], meta[c])) {
-        mask[first + r] = 1
-        count += 1
+  // Text, list and struct columns: Arrow bytes via parquet-wasm. Others: hyparquet, page by page.
+  let arrow = null
+  try {
+    arrow = await openArrowSearch(file.bytes, columns.map((i) => file.summary.columns[i].name))
+  } catch (error) {
+    arrow = null // no WebAssembly here: every column takes the JavaScript path
+  }
+  const total = file.summary.numRows
+  let groupStart = 0
+  for (const group of file.summary.rowGroups) {
+    const groupEnd = groupStart + group.rows
+    for (let c = 0; c < columns.length; c += 1) {
+      if (job !== latest.view) return null
+      const col = columns[c]
+      const name = file.summary.columns[col].name
+      if (arrow?.textual.has(name)) {
+        count += await serial(() => arrow.searchGroup(file.summary.rowGroups.indexOf(group), groupStart, name, term, mask))
+        post({ type: 'progress', job, phase: 'filter', done: groupStart + Math.round((group.rows * (c + 1)) / columns.length), total })
+        continue
       }
+      if (tooLargeIn(groupStart, groupEnd, col)) {
+        skipped.add(file.summary.columns[col].name)
+        continue
+      }
+      await serial(() =>
+        scanColumnPages(file.bytes, file.metadata, groupStart, groupEnd, file.summary.columns[col].name, (values, first) => {
+          const last = Math.min(groupEnd, first + values.length)
+          for (let row = Math.max(groupStart, first); row < last; row += 1) {
+            if (mask[row]) continue
+            if (matches(values[row - first], meta[c])) {
+              mask[row] = 1
+              count += 1
+            }
+          }
+        })
+      )
+      post({ type: 'progress', job, phase: 'filter', done: groupStart + Math.round((group.rows * (c + 1)) / columns.length), total })
     }
-  }, 'view', skipped)
-  if (!finished) return null
+    groupStart = groupEnd
+  }
+  arrow?.free()
   filterCache = { key, mask, count, skipped: [...skipped] }
   return filterCache
 }
@@ -192,6 +257,26 @@ async function buildSort(col, job) {
   if (sortCache?.col === col) return sortCache
   if (tooLargeIn(0, file.summary.numRows, col)) {
     throw Object.assign(new Error(`${file.summary.columns[col].name} has row groups too large to sort safely in Orca.`), { kind: 'sort' })
+  }
+  // Numbers, dates and booleans: typed keys from Arrow, compared without an object per row.
+  let typed = null
+  try {
+    typed = await serial(() => arrowSortKeys(file.bytes, file.summary, col))
+  } catch {
+    typed = null
+  }
+  if (typed) {
+    if (job !== latest.view) return null
+    const { keys: values, isNull: nulls } = typed
+    const rows = []
+    for (let i = 0; i < values.length; i += 1) if (!nulls[i]) rows.push(i)
+    const order = new Int32Array(values.length)
+    order.set(rows)
+    order.subarray(0, rows.length).sort((a, b) => (values[a] < values[b] ? -1 : values[a] > values[b] ? 1 : a - b))
+    let n = rows.length
+    for (let i = 0; i < values.length; i += 1) if (nulls[i]) order[n++] = i
+    sortCache = { col, order, nonNull: rows.length }
+    return sortCache
   }
   const keys = new Array(file.summary.numRows)
   const column = file.summary.columns[col]
@@ -289,14 +374,40 @@ async function pickInOrder(viewRows, columns) {
   return Array.from(viewRows, (row) => columns.map((c) => byRow.get(row)[c]))
 }
 
+const IS_CHILD = new URL(import.meta.url).searchParams.has('child')
+let child = null
+function runInChild(data) {
+  child?.terminate()
+  const worker = new Worker(new URL('./reader-worker.js?child', import.meta.url), { type: 'module' })
+  child = worker
+  worker.onmessage = ({ data: message }) => {
+    if (message.type === 'opened') return
+    if (message.type === 'view' || message.type === 'error') {
+      worker.terminate()
+      if (child === worker) child = null
+    }
+    self.postMessage(message, message.rows ? [message.rows.buffer] : [])
+  }
+  worker.onerror = (event) => {
+    worker.terminate()
+    if (child === worker) child = null
+    self.postMessage({ generation: file.generation, type: 'error', request: 'view', message: event.message ?? 'search worker failed' })
+  }
+  worker.postMessage({ type: 'open', bytes: file.bytes.slice(0), generation: file.generation })
+  worker.postMessage(data)
+}
+
 self.onmessage = async ({ data }) => {
   try {
     if (data.type === 'open') {
       latest.view += 1
       latest.export += 1
+      child?.terminate()
+      child = null
       const { metadata, summary } = openParquet(data.bytes)
       file = { bytes: data.bytes, metadata, summary, generation: data.generation }
       cached = null
+      arrowRows = undefined
       filterCache = null
       sortCache = null
       post({ type: 'opened', summary })
@@ -307,6 +418,9 @@ self.onmessage = async ({ data }) => {
       post({ type: 'rows', start: data.start, rows: await rowsBetween(data.start, data.end) })
     } else if (data.type === 'pick') {
       post({ type: 'picked', rows: data.rows, values: await pick(data.rows) })
+    } else if (data.type === 'view' && !IS_CHILD) {
+      latest.view = data.job
+      runInChild(data)
     } else if (data.type === 'view') {
       latest.view = data.job
       const result = await view(data)

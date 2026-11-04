@@ -25,17 +25,19 @@ It needs nothing installed and asks for no access beyond showing the files it op
 
 The file stays in a worker; the page keeps only the rows near what is on screen.
 
-- **Filter and sort cover the whole file.** The worker streams it one column of one row group
-  at a time, keeping only a match mask and a row order. A filter skips columns that cannot
-  contain the text (a word in a number column). For files over two million cells, search starts
-  when you press Enter rather than at every pause in typing; Esc clears it.
-- **Memory has a ceiling.** Parquet readers decode a column chunk (one column of one row group)
-  whole, so before decoding one the worker estimates its cost from the footer. A chunk over the
-  budget (a nested column in a very large row group, say) is not decoded: its cells read "(too
-  large to load)", a search says which columns it skipped, and such a column cannot be sorted.
-- **Page indexes help.** When the writer stored an offset index (`write_page_index=True` in
-  pyarrow; Spark, DuckDB and Polars can too), showing rows decodes only their pages instead of
-  the whole row group.
+- **Two decoders.** Rows, searches and sorts by number or date are read with
+  [parquet-wasm](https://github.com/kylebarron/parquet-wasm) into compact Apache Arrow buffers:
+  a million strings are one byte buffer rather than a million objects, and a search matches
+  their UTF-8 bytes in place. Everything else, and any client without WebAssembly, uses
+  [hyparquet](https://github.com/hyparam/hyparquet).
+- **Filter and sort cover the whole file**, one row group at a time, keeping only a match mask
+  and a row order. Each search runs in a short-lived worker that is closed when it finishes, so
+  its memory goes back at once. A filter skips columns that cannot contain the text (a word in a
+  number column). For files over two million cells, search starts when you press Enter rather
+  than at every pause in typing; Esc clears it.
+- **Memory has a ceiling.** Where hyparquet decodes, the worker first estimates the cost of each
+  column chunk from the footer; a chunk over the budget is not decoded, its cells read "(too
+  large to load)", and a search says which columns it skipped.
 - Orca opens files up to 64 MB in plugin editors.
 
 ## Development
@@ -49,10 +51,15 @@ orca plugin validate .
 - `editor/reader.js`: footer summary and row reading; `editor/reader-worker.js` runs it off the
   UI thread and keeps the last decoded row group.
 - `editor/format.js`: how values are shown, sorted and exported.
+- `editor/arrow-search.js`: byte-level search, display windows and sort keys over Arrow data;
+  `editor/arrow-values.js` turns Arrow values into the ones hyparquet gives, so both display
+  the same.
 - `editor/vendor/hyparquet.mjs`: [hyparquet](https://github.com/hyparam/hyparquet) and
   [hyparquet-compressors](https://github.com/hyparam/hyparquet-compressors) (MIT), built from
   `tools/hyparquet-bundle`.
+- `editor/vendor/parquet-wasm/` (MIT or Apache-2.0) and `editor/vendor/arrow.mjs` (Apache-2.0),
+  from `tools/arrow-bundle`.
 
 ## License
 
-MIT.
+MIT. Bundled: hyparquet (MIT), parquet-wasm (MIT or Apache-2.0), Apache Arrow JS (Apache-2.0).

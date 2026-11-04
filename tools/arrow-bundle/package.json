@@ -1,0 +1,16 @@
+{
+  "name": "parquet-viewer-arrow-bundle",
+  "private": true,
+  "description": "Builds editor/vendor/arrow.mjs (Apache Arrow JS) and copies parquet-wasm's browser build into editor/vendor/parquet-wasm.",
+  "type": "module",
+  "scripts": {
+    "build": "esbuild entry.js --bundle --format=esm --minify --legal-comments=eof --outfile=../../editor/vendor/arrow.mjs && cp node_modules/parquet-wasm/esm/parquet_wasm.js node_modules/parquet-wasm/esm/parquet_wasm_bg.wasm node_modules/parquet-wasm/LICENSE_MIT node_modules/parquet-wasm/LICENSE_APACHE ../../editor/vendor/parquet-wasm/"
+  },
+  "dependencies": {
+    "apache-arrow": "21.2.0",
+    "parquet-wasm": "0.9.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.24.2"
+  }
+}

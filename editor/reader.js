@@ -234,3 +234,21 @@ export function readRows(buffer, metadata, start, end, columns) {
     }).catch(reject)
   })
 }
+
+/**
+ * Streams one column's decoded pages for rows [start, end) to `visit(values, firstRow)` without
+ * assembling the column: nothing but the page in hand is built. Nested columns arrive per leaf.
+ */
+export function scanColumnPages(buffer, metadata, start, end, name, visit) {
+  return parquetRead({
+    file: buffer,
+    metadata,
+    compressors,
+    utf8: false,
+    useOffsetIndex: true,
+    columns: [name],
+    rowStart: start,
+    rowEnd: end,
+    onPage: ({ columnData, rowStart }) => visit(columnData, rowStart)
+  })
+}
