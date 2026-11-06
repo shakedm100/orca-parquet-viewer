@@ -715,7 +715,7 @@ function renderSchema() {
 
 function statText(value, leaf) {
   if (value === undefined || value === null) return ''
-  const text = cellText(value, { isDate: leaf.isDate }) ?? ''
+  const text = cellText(value, { isDate: leaf.isDate, isFloat32: leaf.type === 'FLOAT' }) ?? ''
   return text.length > 60 ? `${text.slice(0, 60)}…` : text
 }
 

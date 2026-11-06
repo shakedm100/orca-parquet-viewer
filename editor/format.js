@@ -42,17 +42,33 @@ export function toJson(value, space) {
 /**
  * The text shown in a cell.
  * @param {any} value
- * @param {{ kind?: string, isDate?: boolean }} [column]
+ * @param {{ kind?: string, isDate?: boolean, isFloat32?: boolean }} [column]
  */
 export function cellText(value, column = {}) {
   if (value === null || value === undefined) return null
   if (value.tooLarge === true) return '(too large to load)'
   if (typeof value === 'string') return value
-  if (typeof value === 'number') return Number.isInteger(value) ? String(value) : String(Number(value.toPrecision(12)))
+  if (typeof value === 'number') {
+    if (Number.isInteger(value)) return String(value)
+    return column.isFloat32 ? float32Text(value) : String(Number(value.toPrecision(12)))
+  }
   if (typeof value === 'bigint' || typeof value === 'boolean') return String(value)
   if (value instanceof Date) return isoDate(value, column.isDate)
   if (value instanceof Uint8Array) return bytesText(value).text
   return toJson(value)
+}
+
+/**
+ * A 32-bit float in the fewest digits that read back as the same float: the 32.8 a writer stored,
+ * not the 32.7999992370605 its exact value spells out.
+ */
+export function float32Text(value) {
+  if (!Number.isFinite(value)) return String(value)
+  for (let digits = 1; digits <= 9; digits += 1) {
+    const short = Number(value.toPrecision(digits))
+    if (Math.fround(short) === value) return String(short)
+  }
+  return String(value)
 }
 
 /** The full value, for the detail pane: pretty JSON for nested values. */
@@ -122,7 +138,7 @@ export function makeMatcher(term) {
       case 'string':
         return pattern.test(value)
       case 'number':
-        return pattern.test(cellText(value))
+        return pattern.test(cellText(value, column))
       case 'bigint':
       case 'boolean':
         return pattern.test(String(value))

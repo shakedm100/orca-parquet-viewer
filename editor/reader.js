@@ -88,7 +88,8 @@ export function openParquet(buffer) {
     name: child.element.name,
     type: child.children.length ? (child.element.logical_type?.type ?? child.element.converted_type ?? 'struct').toLowerCase() : typeLabel(child.element),
     kind: columnKind(child),
-    isDate: (child.element.logical_type?.type ?? child.element.converted_type) === 'DATE'
+    isDate: (child.element.logical_type?.type ?? child.element.converted_type) === 'DATE',
+    isFloat32: !child.children.length && child.element.type === 'FLOAT'
   }))
 
   // One entry per leaf column chunk path, aggregated over row groups.

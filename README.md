@@ -1,10 +1,13 @@
 # Parquet Viewer for Orca
 
+![The data grid with hourly weather readings](images/screenshot-data-dark.png)
+
 Opens Apache Parquet files (`.parquet`, `.parq`) in Orca's editor, read-only.
 
 - **Data**: a grid that draws only the rows and columns on screen, so wide and long files scroll
   smoothly. Nested values (lists, structs, maps) show as compact JSON; `null` is marked; binary
-  shows as text when it is printable UTF-8 and as hex otherwise.
+  shows as text when it is printable UTF-8 and as hex otherwise. 32-bit floats show the digits
+  that were stored (`32.8`, not `32.7999992370605`).
   - Click a column header to sort (ascending, descending, off). Drag a header's edge to resize
     it; double-click the edge to fit the content.
   - **Filter rows** keeps the rows that contain the text in any visible column. The search
@@ -40,6 +43,16 @@ The file stays in a worker; the page keeps only the rows near what is on screen.
   column chunk from the footer; a chunk over the budget is not decoded, its cells read "(too
   large to load)", and a search says which columns it skipped.
 - Orca opens files up to 64 MB in plugin editors.
+
+## Try it
+
+`examples/make_demo.py` writes `examples/weather.parquet`, a made-up year of hourly readings
+from eight weather stations (70,080 rows, with nulls, a list and a struct column):
+
+```sh
+python3 -m pip install pyarrow
+python3 examples/make_demo.py
+```
 
 ## Development
 

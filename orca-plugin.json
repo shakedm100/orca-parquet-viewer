@@ -4,7 +4,7 @@
   "execution": "sandboxed-ui",
   "id": "parquet-viewer",
   "name": "Parquet Viewer",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Opens Apache Parquet files in the editor: a fast data grid with sort, filter and export, the schema, and file details with per-column statistics.",
   "author": {
     "name": "shakedm100",
@@ -13,6 +13,40 @@
   "repository": "https://github.com/shakedm100/orca-parquet-viewer",
   "homepage": "https://github.com/shakedm100/orca-parquet-viewer",
   "license": "MIT",
+  "icon": "images/icon.png",
+  "cover": {
+    "path": "images/cover.png",
+    "alt": "Parquet Viewer in Orca: a grid of hourly weather readings with typed column headers"
+  },
+  "screenshots": [
+    {
+      "path": "images/screenshot-data-dark.png",
+      "alt": "The data grid with station, city, time and temperature columns in Orca's dark theme",
+      "caption": "Browse wide and long files; only the rows on screen are decoded",
+      "theme": "dark"
+    },
+    {
+      "path": "images/screenshot-data-light.png",
+      "alt": "The same data grid in Orca's light theme",
+      "caption": "Browse wide and long files; only the rows on screen are decoded",
+      "theme": "light"
+    },
+    {
+      "path": "images/screenshot-filter.png",
+      "alt": "Rows filtered by the word lightning: 527 of 70,080 rows match, showing list and struct columns",
+      "caption": "Filter rows across the whole file, nested columns included"
+    },
+    {
+      "path": "images/screenshot-schema.png",
+      "alt": "The Schema tab listing each field with its logical type, physical type and repetition",
+      "caption": "The schema, with logical and physical types"
+    },
+    {
+      "path": "images/screenshot-info.png",
+      "alt": "The Info tab with file size, compression and per-column codecs, sizes, null counts and min and max values",
+      "caption": "Row groups, compression and column statistics"
+    }
+  ],
   "engines": {
     "orca": ">=1.4.246"
   },

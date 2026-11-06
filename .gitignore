@@ -1,3 +1,4 @@
 .orca/
 node_modules/
 tools/*/package-lock.json
+examples/*.parquet
